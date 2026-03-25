@@ -399,6 +399,9 @@ async fn run_session(
                     }
                     Ok(AsrEvent::Definite(text)) => {
                         aggregator.update_definite(&text);
+                        if !text.is_empty() {
+                            invoke_interim_text(&text);
+                        }
                     }
                     Ok(AsrEvent::Final(text)) => {
                         aggregator.update_final(&text);
