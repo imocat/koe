@@ -249,6 +249,7 @@ static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
 @property (nonatomic, strong) NSView *currentPaneView;
 
 // ASR fields
+@property (nonatomic, strong) NSPopUpButton *asrProviderPopup;
 @property (nonatomic, strong) NSTextField *asrAppKeyField;
 @property (nonatomic, strong) NSTextField *asrAccessKeyField;
 @property (nonatomic, strong) NSSecureTextField *asrAccessKeySecureField;
@@ -423,16 +424,24 @@ static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
     CGFloat rowH = 32;
 
     // Calculate content height
-    CGFloat contentHeight = 220;
+    CGFloat contentHeight = 256;
     NSView *pane = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, paneWidth, contentHeight)];
 
     CGFloat y = contentHeight - 48;
 
     // Description
-    NSTextField *desc = [self descriptionLabel:@"Configure the Doubao Streaming ASR service. You need credentials from the Volcengine console."];
+    NSTextField *desc = [self descriptionLabel:@"Choose the ASR provider used for transcription. Currently only Doubao is available."];
     desc.frame = NSMakeRect(24, y - 10, paneWidth - 48, 36);
     [pane addSubview:desc];
     y -= 52;
+
+    // Provider
+    [pane addSubview:[self formLabel:@"Provider" frame:NSMakeRect(16, y, labelW, 22)]];
+    self.asrProviderPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(fieldX, y - 2, 220, 26) pullsDown:NO];
+    [self.asrProviderPopup addItemWithTitle:@"Doubao (\u8c46\u5305)"];
+    [self.asrProviderPopup itemAtIndex:0].representedObject = @"doubao";
+    [pane addSubview:self.asrProviderPopup];
+    y -= rowH;
 
     // App Key
     [pane addSubview:[self formLabel:@"App Key" frame:NSMakeRect(16, y, labelW, 22)]];
@@ -806,6 +815,14 @@ static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
     NSString *yaml = [NSString stringWithContentsOfFile:configPath encoding:NSUTF8StringEncoding error:nil] ?: @"";
 
     if ([identifier isEqualToString:kToolbarASR]) {
+        NSString *provider = yamlRead(yaml, @"asr.provider");
+        if (provider.length == 0) provider = @"doubao";
+        for (NSInteger i = 0; i < self.asrProviderPopup.numberOfItems; i++) {
+            if ([[self.asrProviderPopup itemAtIndex:i].representedObject isEqualToString:provider]) {
+                [self.asrProviderPopup selectItemAtIndex:i];
+                break;
+            }
+        }
         self.asrAppKeyField.stringValue = yamlRead(yaml, @"asr.doubao.app_key");
         NSString *accessKey = yamlRead(yaml, @"asr.doubao.access_key");
         self.asrAccessKeySecureField.stringValue = accessKey;
@@ -882,6 +899,8 @@ static NSString *yamlWrite(NSString *yaml, NSString *keyPath, NSString *value) {
 
     // Update ASR fields (always save — fields may be nil if pane not visited, check first)
     if (self.asrAppKeyField) {
+        NSString *selectedProvider = self.asrProviderPopup.selectedItem.representedObject ?: @"doubao";
+        yaml = yamlWrite(yaml, @"asr.provider", selectedProvider);
         yaml = yamlWrite(yaml, @"asr.doubao.app_key", self.asrAppKeyField.stringValue);
         NSString *accessKey = self.asrAccessKeyToggle.tag == 1 ? self.asrAccessKeyField.stringValue : self.asrAccessKeySecureField.stringValue;
         yaml = yamlWrite(yaml, @"asr.doubao.access_key", accessKey);
