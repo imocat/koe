@@ -1,14 +1,19 @@
-.PHONY: build build-rust build-xcode clean run
+.PHONY: build build-rust build-xcode build-x86_64 clean run
 
 ARCH := aarch64-apple-darwin
+XCODE_ARCH := arm64
 
 build: build-rust build-xcode
+
+build-x86_64:
+	cargo build --manifest-path koe-core/Cargo.toml --release --target x86_64-apple-darwin
+	cd KoeApp && xcodebuild -project Koe.xcodeproj -scheme Koe -configuration Release ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO build
 
 build-rust:
 	cargo build --manifest-path koe-core/Cargo.toml --release --target $(ARCH)
 
 build-xcode:
-	cd KoeApp && xcodebuild -project Koe.xcodeproj -scheme Koe -configuration Release build
+	cd KoeApp && xcodebuild -project Koe.xcodeproj -scheme Koe -configuration Release ARCHS=$(XCODE_ARCH) build
 
 clean:
 	cargo clean
