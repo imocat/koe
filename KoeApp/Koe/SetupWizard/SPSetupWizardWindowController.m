@@ -3,7 +3,6 @@
 #import <Cocoa/Cocoa.h>
 
 static NSString *const kConfigDir = @".koe";
-static NSString *const kConfigFile = @"config.yaml";
 static NSString *const kDictionaryFile = @"dictionary.txt";
 static NSString *const kSystemPromptFile = @"system_prompt.txt";
 
