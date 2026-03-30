@@ -674,18 +674,33 @@ async fn run_session(
         )
         .await;
 
-        if wait_result.is_err() {
-            log::warn!("[{session_id}] ASR final result timed out");
+        match wait_result {
+            Ok(Some(err_msg)) => {
+                asr_error.get_or_insert(err_msg);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                log::warn!("[{session_id}] ASR final result timed out");
+            }
         }
     }
 
     let _ = asr.close().await;
 
+    // If ASR reported an error, fail the session even if partial text was accumulated.
+    // Continuing with truncated/unconfirmed text would paste garbage into the user's app.
+    if let Some(error_msg) = asr_error {
+        log::warn!("[{session_id}] ASR failed (discarding partial text): {error_msg}");
+        invoke_session_error(session_token, &error_msg);
+        invoke_state_changed(session_token, "failed");
+        cleanup_session(&session_arc);
+        return;
+    }
+
     let asr_text = aggregator.best_text().to_string();
     if asr_text.is_empty() {
-        let error_msg = asr_error.unwrap_or_else(|| "no speech recognized".to_string());
-        log::warn!("[{session_id}] no ASR text available: {error_msg}");
-        invoke_session_error(session_token, &error_msg);
+        log::warn!("[{session_id}] no ASR text available: no speech recognized");
+        invoke_session_error(session_token, "no speech recognized");
         invoke_state_changed(session_token, "failed");
         cleanup_session(&session_arc);
         return;
@@ -830,13 +845,13 @@ async fn wait_for_final(
     session_token: u64,
     asr: &mut dyn AsrProvider,
     aggregator: &mut TranscriptAggregator,
-) {
+) -> Option<String> {
     loop {
         match asr.next_event().await {
             Ok(AsrEvent::Final(text)) => {
                 aggregator.update_final(&text);
                 invoke_interim_text(session_token,&text);
-                return;
+                return None;
             }
             Ok(AsrEvent::Interim(text)) => {
                 if !text.is_empty() {
@@ -848,9 +863,16 @@ async fn wait_for_final(
                 aggregator.update_definite(&text);
                 invoke_interim_text(session_token, aggregator.best_text());
             }
-            Ok(AsrEvent::Closed) => return,
+            Ok(AsrEvent::Closed) => return None,
+            Ok(AsrEvent::Error(msg)) => {
+                log::error!("ASR error in wait_for_final: {msg}");
+                return Some(msg);
+            }
             Ok(_) => {}
-            Err(_) => return,
+            Err(e) => {
+                log::error!("ASR read error in wait_for_final: {e}");
+                return Some(format!("ASR error: {e}"));
+            }
         }
     }
 }
@@ -1224,5 +1246,123 @@ pub unsafe extern "C" fn sp_core_remove_model_files(model_path: *const c_char) -
 fn invoke_model_status(cb: &ModelCallbackCtx, status: i32, message: &str) {
     if let Ok(cstr) = CString::new(message) {
         (cb.status_cb)(cb.ctx, status, cstr.as_ptr());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use koe_asr::{AsrError, AsrEvent, AsrProvider, TranscriptAggregator};
+    use std::collections::VecDeque;
+
+    /// Mock ASR provider that yields a pre-configured sequence of events.
+    struct MockAsrProvider {
+        events: VecDeque<koe_asr::error::Result<AsrEvent>>,
+    }
+
+    impl MockAsrProvider {
+        fn new(events: Vec<koe_asr::error::Result<AsrEvent>>) -> Self {
+            Self {
+                events: events.into(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsrProvider for MockAsrProvider {
+        async fn connect(&mut self, _config: &koe_asr::AsrConfig) -> koe_asr::error::Result<()> {
+            Ok(())
+        }
+        async fn send_audio(&mut self, _frame: &[u8]) -> koe_asr::error::Result<()> {
+            Ok(())
+        }
+        async fn finish_input(&mut self) -> koe_asr::error::Result<()> {
+            Ok(())
+        }
+        async fn next_event(&mut self) -> koe_asr::error::Result<AsrEvent> {
+            self.events
+                .pop_front()
+                .unwrap_or(Ok(AsrEvent::Closed))
+        }
+        async fn close(&mut self) -> koe_asr::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    // ── wait_for_final tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn wait_for_final_returns_none_on_final_event() {
+        let mut mock = MockAsrProvider::new(vec![
+            Ok(AsrEvent::Interim("partial".into())),
+            Ok(AsrEvent::Final("complete".into())),
+        ]);
+        let mut agg = TranscriptAggregator::new();
+        let result = wait_for_final(0, &mut mock, &mut agg).await;
+        assert!(result.is_none());
+        assert_eq!(agg.best_text(), "complete");
+    }
+
+    #[tokio::test]
+    async fn wait_for_final_returns_none_on_closed() {
+        let mut mock = MockAsrProvider::new(vec![Ok(AsrEvent::Closed)]);
+        let mut agg = TranscriptAggregator::new();
+        let result = wait_for_final(0, &mut mock, &mut agg).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_final_returns_error_on_error_event() {
+        let mut mock = MockAsrProvider::new(vec![
+            Ok(AsrEvent::Interim("partial".into())),
+            Ok(AsrEvent::Error("provider error".into())),
+        ]);
+        let mut agg = TranscriptAggregator::new();
+        let result = wait_for_final(0, &mut mock, &mut agg).await;
+        assert_eq!(result, Some("provider error".into()));
+    }
+
+    #[tokio::test]
+    async fn wait_for_final_returns_error_on_read_error() {
+        let mut mock = MockAsrProvider::new(vec![
+            Err(AsrError::Connection("connection lost".into())),
+        ]);
+        let mut agg = TranscriptAggregator::new();
+        let result = wait_for_final(0, &mut mock, &mut agg).await;
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("connection"));
+    }
+
+    // ── Main loop error-with-partial-text tests ─────────────────────────
+
+    /// Simulates the post-ASR decision: should the session fail?
+    /// Mirrors the logic from run_session after asr.close().
+    fn should_fail_session(asr_error: &Option<String>, asr_text: &str) -> bool {
+        // Fail if there was an error (regardless of accumulated text)
+        // or if there's no text at all
+        asr_error.is_some() || asr_text.is_empty()
+    }
+
+    #[test]
+    fn error_with_no_text_fails_session() {
+        let asr_error = Some("ASR error: connection lost".into());
+        assert!(should_fail_session(&asr_error, ""));
+    }
+
+    #[test]
+    fn error_with_partial_text_fails_session() {
+        // ASR error should fail the session even with accumulated partial text
+        let asr_error = Some("ASR error: connection lost".into());
+        assert!(should_fail_session(&asr_error, "hello wor"));
+    }
+
+    #[test]
+    fn no_error_with_text_proceeds() {
+        assert!(!should_fail_session(&None, "hello world"));
+    }
+
+    #[test]
+    fn no_error_no_text_fails() {
+        assert!(should_fail_session(&None, ""));
     }
 }
