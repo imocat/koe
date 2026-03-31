@@ -275,13 +275,36 @@ pub fn remove_model_files(model_dir: &Path) -> Result<usize> {
         std::fs::read_dir(model_dir).map_err(|e| KoeError::Config(format!("read dir: {e}")))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if name != MANIFEST_FILE && entry.path().is_file() {
-            std::fs::remove_file(entry.path())
-                .map_err(|e| KoeError::Config(format!("remove {}: {e}", entry.path().display())))?;
+        if name == MANIFEST_FILE {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            removed += count_files_recursive(&path);
+            std::fs::remove_dir_all(&path)
+                .map_err(|e| KoeError::Config(format!("remove dir {}: {e}", path.display())))?;
+        } else if path.is_file() {
+            std::fs::remove_file(&path)
+                .map_err(|e| KoeError::Config(format!("remove {}: {e}", path.display())))?;
             removed += 1;
         }
     }
     Ok(removed)
+}
+
+fn count_files_recursive(dir: &Path) -> usize {
+    let mut count = 0;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                count += count_files_recursive(&path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 // ─── Download ───────────────────────────────────────────────────────
