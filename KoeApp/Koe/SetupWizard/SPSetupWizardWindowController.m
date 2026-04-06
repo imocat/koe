@@ -1735,7 +1735,9 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     self.asrTestResultLabel.textColor = [NSColor secondaryLabelColor];
 
     // Create WebSocket connection test
-    NSURL *url = [NSURL URLWithString:@"wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"];
+    NSString *doubaoUrl = configGet(@"asr.doubao.url");
+    if (doubaoUrl.length == 0) doubaoUrl = @"wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+    NSURL *url = [NSURL URLWithString:doubaoUrl];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.timeoutInterval = 5;
 
@@ -1851,7 +1853,11 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     self.asrTestResultLabel.textColor = [NSColor secondaryLabelColor];
 
     // Create WebSocket connection test
-    NSURL *url = [NSURL URLWithString:@"wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-asr-flash-realtime"];
+    NSString *qwenBaseUrl = configGet(@"asr.qwen.url");
+    if (qwenBaseUrl.length == 0) qwenBaseUrl = @"wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+    NSString *qwenModel = configGet(@"asr.qwen.model");
+    if (qwenModel.length == 0) qwenModel = @"qwen3-asr-flash-realtime";
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"%@?model=%@", qwenBaseUrl, qwenModel]];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.timeoutInterval = 10;
 
