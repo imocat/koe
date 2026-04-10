@@ -44,6 +44,9 @@ typedef NS_ENUM(uint8_t, SPHotkeyMatchKind) {
 /// terminates a recording session outside the normal hotkey flow.
 - (void)resetToIdle;
 
+/// Whether the current CGEventTap can consume handled key events globally.
+@property (nonatomic, assign, readonly) BOOL canConsumeGlobalKeyEvents;
+
 /// Optional block called when a number key (1-9) is pressed.
 /// Return YES to consume the key event so it does not continue to the target app.
 @property (nonatomic, copy) BOOL (^numberKeyHandler)(NSInteger number);

@@ -549,7 +549,7 @@ impl HotkeySection {
                     modifier_flag: combo.modifier_mask,
                     match_kind: HotkeyMatchKind::KeyDown,
                 }
-            },
+            }
             // Raw keycode (non-modifier key, detected via keyDown/keyUp)
             _ if Self::parse_raw_keycode(key).is_some() => {
                 let code = Self::parse_raw_keycode(key).unwrap();
@@ -699,8 +699,7 @@ fn default_translate_to_english_prompt_template() -> PromptTemplate {
         enabled: true,
         shortcut: 1,
         system_prompt: Some(
-            "将用户的语音输入翻译为流畅的英文。保持原意，不要添加额外内容。只输出翻译结果。"
-                .into(),
+            "将用户的语音输入翻译为流畅的英文。保持原意，不要添加额外内容。只输出翻译结果。".into(),
         ),
         system_prompt_path: None,
     }
@@ -824,8 +823,9 @@ impl PromptTemplate {
     /// Resolve the system prompt: inline text takes priority, then file path.
     pub fn resolve_system_prompt(&self) -> Option<String> {
         if let Some(ref text) = self.system_prompt {
-            if !text.is_empty() {
-                return Some(text.clone());
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
         if let Some(ref path) = self.system_prompt_path {
@@ -1529,7 +1529,11 @@ mod tests {
             serde_yaml::Value::String("prompt_templates".into()),
             serde_yaml::to_value(legacy_default_prompt_templates()).unwrap(),
         );
-        fs::write(&path, serde_yaml::to_string(&serde_yaml::Value::Mapping(doc)).unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_yaml::to_string(&serde_yaml::Value::Mapping(doc)).unwrap(),
+        )
+        .unwrap();
 
         let config = Config {
             prompt_templates: legacy_default_prompt_templates(),

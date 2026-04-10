@@ -633,6 +633,12 @@ static BOOL configFlagEnabled(const char *keyPath) {
 #pragma mark - Number Key Monitoring
 
 - (void)startNumberKeyMonitoring {
+    if (!self.hotkeyMonitor.canConsumeGlobalKeyEvents) {
+        self.hotkeyMonitor.numberKeyHandler = nil;
+        NSLog(@"[Koe] Template selector visible (click-only; global number shortcuts unavailable without an active suppressing event tap)");
+        return;
+    }
+
     __weak typeof(self) weakSelf = self;
     self.hotkeyMonitor.numberKeyHandler = ^BOOL(NSInteger number) {
         __strong typeof(weakSelf) strongSelf = weakSelf;

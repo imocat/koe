@@ -22,14 +22,18 @@ typedef NS_ENUM(NSInteger, SPHotkeyState) {
 @property (nonatomic, strong) id globalMonitorRef;
 @property (nonatomic, strong) id localMonitorRef;
 @property (nonatomic, assign) BOOL running;
+@property (nonatomic, assign, readwrite) BOOL canConsumeGlobalKeyEvents;
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *suppressedNumberKeyCodes;
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *suppressedHotkeyKeyCodes;
 
 - (void)handleFlagsChangedEvent:(CGEventRef)event;
+- (BOOL)handleNSEvent:(NSEvent *)event;
 - (BOOL)isTargetKeyCode:(NSInteger)keyCode;
 - (BOOL)isModifierOnlyMatchKind:(uint8_t)matchKind;
 - (BOOL)keyModifiers:(NSUInteger)flags matchRequiredModifiers:(NSUInteger)requiredFlags;
 - (BOOL)isRecordingState;
+- (BOOL)handleNumberKeyWithKeyCode:(NSInteger)keyCode;
+- (BOOL)consumeSuppressedNumberKeyForKeyCode:(NSInteger)keyCode isKeyUp:(BOOL)isKeyUp;
 - (void)handleTriggerDown;
 - (void)handleTriggerUp;
 
@@ -85,9 +89,8 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
         BOOL isRepeat = CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) != 0;
         BOOL suppressedTriggerKey = [monitor.suppressedHotkeyKeyCodes containsObject:keyCodeNumber];
 
-        if (type == kCGEventKeyUp && [monitor.suppressedNumberKeyCodes containsObject:keyCodeNumber]) {
-            [monitor.suppressedNumberKeyCodes removeObject:keyCodeNumber];
-            return NULL;
+        if ([monitor consumeSuppressedNumberKeyForKeyCode:keyCode isKeyUp:(type == kCGEventKeyUp)]) {
+            return monitor.canConsumeGlobalKeyEvents ? NULL : event;
         }
 
         if (isRepeat) {
@@ -97,29 +100,20 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
         // Forward number keys 1-9 if handler is set.
         // When handled, suppress both keyDown and keyUp so the typed digit
         // does not leak into the user's target app.
-        if (type == kCGEventKeyDown && monitor.numberKeyHandler) {
-            NSInteger number = numberForKeyCode(keyCode);
-            if (number > 0) {
-                BOOL (^handler)(NSInteger) = monitor.numberKeyHandler;
-                __block BOOL handled = NO;
-                if ([NSThread isMainThread]) {
-                    handled = handler(number);
-                } else {
-                    dispatch_sync(dispatch_get_main_queue(), ^{
-                        handled = handler(number);
-                    });
-                }
-                if (handled) {
-                    [monitor.suppressedNumberKeyCodes addObject:keyCodeNumber];
-                    return NULL;
-                }
-            }
+        if (type == kCGEventKeyDown && [monitor handleNumberKeyWithKeyCode:keyCode]) {
+            return monitor.canConsumeGlobalKeyEvents ? NULL : event;
         }
 
-        if (![monitor isModifierOnlyMatchKind:monitor.targetMatchKind] &&
+        BOOL handlesModifierOnlyTrigger =
+            [monitor isModifierOnlyMatchKind:monitor.targetMatchKind] &&
+            [monitor isTargetKeyCode:keyCode];
+        BOOL handlesKeyDownMatchedTrigger =
+            ![monitor isModifierOnlyMatchKind:monitor.targetMatchKind] &&
             [monitor isTargetKeyCode:keyCode] &&
             ([monitor keyModifiers:flags matchRequiredModifiers:monitor.targetModifierFlag] ||
-             (type == kCGEventKeyUp && suppressedTriggerKey))) {
+             (type == kCGEventKeyUp && suppressedTriggerKey));
+
+        if (handlesModifierOnlyTrigger || handlesKeyDownMatchedTrigger) {
             CGEventFlags flags = CGEventGetFlags(event);
             NSLog(@"[Koe] Key event: type=%d keyCode=%ld flags=0x%llx",
                   type, (long)keyCode, (unsigned long long)flags);
@@ -134,11 +128,11 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
                     }
                 });
             }
-            if (isDown) {
+            if (handlesKeyDownMatchedTrigger && isDown) {
                 [monitor.suppressedHotkeyKeyCodes addObject:keyCodeNumber];
                 return NULL;
             }
-            if (suppressedTriggerKey) {
+            if (handlesKeyDownMatchedTrigger && suppressedTriggerKey) {
                 [monitor.suppressedHotkeyKeyCodes removeObject:keyCodeNumber];
                 return NULL;
             }
@@ -166,6 +160,7 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
         _altKeyCode = 179;         // Globe key on newer keyboards
         _targetModifierFlag = 0x00800000; // NX_SECONDARYFNMASK
         _targetMatchKind = SPHotkeyMatchKindModifierOnly;
+        _canConsumeGlobalKeyEvents = NO;
         _suppressedNumberKeyCodes = [NSMutableSet set];
         _suppressedHotkeyKeyCodes = [NSMutableSet set];
     }
@@ -188,8 +183,7 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
 
     self.localMonitorRef = [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskFlagsChanged | NSEventMaskKeyDown | NSEventMaskKeyUp)
                                                                 handler:^NSEvent *(NSEvent *event) {
-        [weakSelf handleNSEvent:event];
-        return event;
+        return [weakSelf handleNSEvent:event] ? nil : event;
     }];
 
     NSLog(@"[Koe] Hotkey monitor started via NSEvent monitors (trigger=%ld/%ld flag=0x%lx kind=%u threshold=%.0fms)",
@@ -217,6 +211,7 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
         { kCGHIDEventTap, kCGEventTapOptionListenOnly, @"[Koe] CGEventTap active in listen-only fallback mode on HID stream" },
     };
 
+    self.canConsumeGlobalKeyEvents = NO;
     for (NSUInteger i = 0; i < sizeof(attempts) / sizeof(attempts[0]); i++) {
         self.eventTap = CGEventTapCreate(attempts[i].location,
                                          kCGHeadInsertEventTap,
@@ -231,6 +226,7 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
         self.runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, self.eventTap, 0);
         CFRunLoopAddSource(CFRunLoopGetMain(), self.runLoopSource, kCFRunLoopCommonModes);
         CGEventTapEnable(self.eventTap, true);
+        self.canConsumeGlobalKeyEvents = (attempts[i].options == kCGEventTapOptionDefault);
         NSLog(@"%@", attempts[i].logMessage);
         break;
     }
@@ -268,16 +264,53 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
     return self.state == SPHotkeyStateRecordingHold || self.state == SPHotkeyStateRecordingToggle;
 }
 
-- (void)handleNSEvent:(NSEvent *)event {
-    if (!self.running || self.suspended) return;
+- (BOOL)handleNumberKeyWithKeyCode:(NSInteger)keyCode {
+    if (!self.numberKeyHandler) return NO;
+
+    NSInteger number = numberForKeyCode(keyCode);
+    if (number <= 0) return NO;
+
+    BOOL (^handler)(NSInteger) = self.numberKeyHandler;
+    __block BOOL handled = NO;
+    if ([NSThread isMainThread]) {
+        handled = handler(number);
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            handled = handler(number);
+        });
+    }
+
+    if (handled) {
+        [self.suppressedNumberKeyCodes addObject:@(keyCode)];
+    }
+    return handled;
+}
+
+- (BOOL)consumeSuppressedNumberKeyForKeyCode:(NSInteger)keyCode isKeyUp:(BOOL)isKeyUp {
+    NSNumber *keyCodeNumber = @(keyCode);
+    if (![self.suppressedNumberKeyCodes containsObject:keyCodeNumber]) {
+        return NO;
+    }
+    if (isKeyUp) {
+        [self.suppressedNumberKeyCodes removeObject:keyCodeNumber];
+    }
+    return YES;
+}
+
+- (BOOL)handleNSEvent:(NSEvent *)event {
+    if (!self.running || self.suspended) return NO;
 
     if (event.type == NSEventTypeFlagsChanged) {
         NSUInteger flags = event.modifierFlags;
         NSInteger keyCode = event.keyCode;
         NSLog(@"[Koe] NSEvent FlagsChanged: keyCode=%ld flags=0x%lx", (long)keyCode, (unsigned long)flags);
 
-        if ([self isModifierOnlyMatchKind:self.targetMatchKind] && [self isTargetKeyCode:keyCode]) {
+        if ([self isModifierOnlyMatchKind:self.targetMatchKind]) {
             BOOL keyNow = (flags & self.targetModifierFlag) != 0;
+            BOOL isReleaseFallback = self.triggerDown && !keyNow;
+            if (![self isTargetKeyCode:keyCode] && !isReleaseFallback) {
+                return NO;
+            }
             if (keyNow != self.triggerDown) {
                 self.triggerDown = keyNow;
                 if (keyNow) {
@@ -288,15 +321,29 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
             }
         }
     } else if (event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp) {
-        if ([event isARepeat]) return;
         NSInteger keyCode = event.keyCode;
+        if ([self consumeSuppressedNumberKeyForKeyCode:keyCode isKeyUp:(event.type == NSEventTypeKeyUp)]) {
+            return YES;
+        }
+        if ([event isARepeat]) return NO;
         NSUInteger flags = event.modifierFlags;
 
-        // Some macOS versions send modifier keys as keyDown/keyUp events. For
-        // keyDown-matched shortcuts, only trigger when the exact modifier set matches.
-        if (![self isModifierOnlyMatchKind:self.targetMatchKind] &&
-            [self isTargetKeyCode:keyCode] &&
-            [self keyModifiers:flags matchRequiredModifiers:self.targetModifierFlag]) {
+        if (event.type == NSEventTypeKeyDown && [self handleNumberKeyWithKeyCode:keyCode]) {
+            return YES;
+        }
+
+        // Some macOS versions send modifier keys as keyDown/keyUp events. Keep
+        // a direct keyDown/keyUp fallback for modifier-only triggers like Fn.
+        BOOL shouldHandleTriggerKeyEvent = NO;
+        if ([self isTargetKeyCode:keyCode]) {
+            if ([self isModifierOnlyMatchKind:self.targetMatchKind]) {
+                shouldHandleTriggerKeyEvent = YES;
+            } else if ([self keyModifiers:flags matchRequiredModifiers:self.targetModifierFlag]) {
+                shouldHandleTriggerKeyEvent = YES;
+            }
+        }
+
+        if (shouldHandleTriggerKeyEvent) {
             BOOL isDown = (event.type == NSEventTypeKeyDown);
             NSLog(@"[Koe] NSEvent Key%@: keyCode=%ld", isDown ? @"Down" : @"Up", (long)keyCode);
             if (isDown != self.triggerDown) {
@@ -309,6 +356,7 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
             }
         }
     }
+    return NO;
 }
 
 - (void)stop {
@@ -337,6 +385,7 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
 
     [self cancelHoldTimer];
     self.state = SPHotkeyStateIdle;
+    self.canConsumeGlobalKeyEvents = NO;
     [self.suppressedNumberKeyCodes removeAllObjects];
     [self.suppressedHotkeyKeyCodes removeAllObjects];
     NSLog(@"[Koe] Hotkey monitor stopped");
@@ -353,8 +402,12 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
     // 1. Check if keyCode matches the configured trigger key
     // 2. Check modifier flag bit for key state
     BOOL triggerNow;
-    if ([self isModifierOnlyMatchKind:self.targetMatchKind] && [self isTargetKeyCode:keyCode]) {
+    if ([self isModifierOnlyMatchKind:self.targetMatchKind]) {
         triggerNow = (flags & self.targetModifierFlag) != 0;
+        BOOL isReleaseFallback = self.triggerDown && !triggerNow;
+        if (![self isTargetKeyCode:keyCode] && !isReleaseFallback) {
+            return;
+        }
     } else {
         return;
     }
@@ -450,6 +503,7 @@ static CGEventRef hotkeyEventCallback(CGEventTapProxy proxy,
     self.triggerDown = NO;
     self.state = SPHotkeyStateIdle;
     [self.suppressedNumberKeyCodes removeAllObjects];
+    [self.suppressedHotkeyKeyCodes removeAllObjects];
 }
 
 @end

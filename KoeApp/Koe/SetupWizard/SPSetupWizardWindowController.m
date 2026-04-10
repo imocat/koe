@@ -51,6 +51,24 @@ static NSString *configDirPath(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:kConfigDir];
 }
 
+static NSString *configFilePath(void) {
+    return [configDirPath() stringByAppendingPathComponent:@"config.yaml"];
+}
+
+static BOOL restoreConfigSnapshot(NSString *snapshot, BOOL existed, NSError **error) {
+    NSString *path = configFilePath();
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    if (!existed) {
+        if (![fileManager fileExistsAtPath:path]) return YES;
+        return [fileManager removeItemAtPath:path error:error];
+    }
+
+    return [(snapshot ?: @"") writeToFile:path
+                               atomically:YES
+                                 encoding:NSUTF8StringEncoding
+                                    error:error];
+}
+
 
 static NSString *configGet(NSString *keyPath) {
     char *raw = sp_config_get(keyPath.UTF8String);
@@ -1823,7 +1841,8 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
     id inlinePrompt = templateData[@"system_prompt"];
     if ([inlinePrompt isKindOfClass:[NSString class]]) {
         NSString *inlineText = (NSString *)inlinePrompt;
-        if (inlineText.length > 0) {
+        NSString *trimmedInlineText = [inlineText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmedInlineText.length > 0) {
             return inlineText;
         }
     }
@@ -1836,7 +1855,10 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
                                                         encoding:NSUTF8StringEncoding
                                                            error:nil];
         if ([filePrompt isKindOfClass:[NSString class]]) {
-            return filePrompt;
+            NSString *trimmedFilePrompt = [filePrompt stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (trimmedFilePrompt.length > 0) {
+                return filePrompt;
+            }
         }
     }
 
@@ -1860,6 +1882,11 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
 - (BOOL)isTemplateEnabled:(NSDictionary *)templateData {
     id enabledValue = templateData[@"enabled"];
     return ![enabledValue isKindOfClass:[NSNumber class]] || [enabledValue boolValue];
+}
+
+- (NSString *)trimmedResolvedPromptTextForTemplate:(NSDictionary *)templateData {
+    NSString *resolvedPrompt = [self resolvedPromptTextForTemplate:templateData] ?: @"";
+    return [resolvedPrompt stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
 // ─── Template List: selection only loads, NEVER saves back automatically ───
@@ -2063,6 +2090,10 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
         }
         if ([used containsObject:@(value)]) {
             if (message) *message = @"Each prompt template shortcut must be unique.";
+            return NO;
+        }
+        if ([self trimmedResolvedPromptTextForTemplate:tmpl].length == 0) {
+            if (message) *message = @"Each prompt template needs a non-empty prompt.";
             return NO;
         }
         [used addObject:@(value)];
@@ -3349,7 +3380,36 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
                                                attributes:nil
                                                     error:nil];
 
+    NSArray<NSDictionary *> *serializedTemplates = nil;
+    if (self.templatesData) {
+        [self saveCurrentTemplateEdits];
+        NSString *templateError = nil;
+        if (![self validateTemplatesDataWithMessage:&templateError]) {
+            [self showAlert:@"Invalid prompt templates"
+                       info:templateError ?: @"Check your templates and try again."];
+            return;
+        }
+        serializedTemplates = [self serializedTemplatesData];
+    }
+
+    NSString *configPath = configFilePath();
+    BOOL configExisted = [[NSFileManager defaultManager] fileExistsAtPath:configPath];
+    NSString *originalConfigSnapshot = [NSString stringWithContentsOfFile:configPath
+                                                                 encoding:NSUTF8StringEncoding
+                                                                    error:nil] ?: @"";
+    __block BOOL shouldRollbackConfig = NO;
+    void (^rollbackConfigIfNeeded)(void) = ^{
+        if (!shouldRollbackConfig) return;
+
+        NSError *rollbackError = nil;
+        if (!restoreConfigSnapshot(originalConfigSnapshot, configExisted, &rollbackError)) {
+            NSLog(@"[Koe] Failed to restore config snapshot: %@", rollbackError.localizedDescription);
+        }
+        [self.rustBridge reloadConfig];
+    };
+
     // Track whether any config write fails
+    shouldRollbackConfig = YES;
     BOOL saveOk = YES;
 
     // Update ASR fields (always save — fields may be nil if pane not visited, check first)
@@ -3433,21 +3493,16 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     }
 
     if (!saveOk) {
+        rollbackConfigIfNeeded();
         [self showAlert:@"Some settings failed to save"
                    info:@"Check that ~/.koe/config.yaml is writable and try again."];
         return;
     }
 
     // Save prompt templates
-    if (self.templatesData) {
-        [self saveCurrentTemplateEdits];
-        NSString *templateError = nil;
-        if (![self validateTemplatesDataWithMessage:&templateError]) {
-            [self showAlert:@"Invalid prompt templates"
-                       info:templateError ?: @"Check your templates and try again."];
-            return;
-        }
-        if (![self.rustBridge setPromptTemplates:[self serializedTemplatesData]]) {
+    if (serializedTemplates) {
+        if (![self.rustBridge setPromptTemplates:serializedTemplates]) {
+            rollbackConfigIfNeeded();
             [self showAlert:@"Failed to save prompt templates"
                        info:@"Check your prompt templates and ~/.koe/config.yaml, then try again."];
             return;
@@ -3461,6 +3516,7 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
         [self.dictionaryTextView.string writeToFile:dictPath atomically:YES encoding:NSUTF8StringEncoding error:&error];
         if (error) {
             NSLog(@"[Koe] Failed to write dictionary.txt: %@", error.localizedDescription);
+            rollbackConfigIfNeeded();
             [self showAlert:@"Failed to save dictionary.txt" info:error.localizedDescription];
             return;
         }
@@ -3472,11 +3528,13 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
         [self.systemPromptTextView.string writeToFile:promptPath atomically:YES encoding:NSUTF8StringEncoding error:&error];
         if (error) {
             NSLog(@"[Koe] Failed to write system_prompt.txt: %@", error.localizedDescription);
+            rollbackConfigIfNeeded();
             [self showAlert:@"Failed to save system_prompt.txt" info:error.localizedDescription];
             return;
         }
     }
 
+    shouldRollbackConfig = NO;
     NSLog(@"[Koe] Settings saved");
 
     // Notify delegate to reload

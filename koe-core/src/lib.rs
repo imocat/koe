@@ -12,9 +12,9 @@ pub mod telemetry;
 use crate::config::Config;
 use crate::ffi::{
     cstr_to_str, invoke_asr_final_text, invoke_final_text_ready, invoke_interim_text,
-    invoke_rewrite_text_ready, invoke_session_error, invoke_session_ready,
-    invoke_session_warning, invoke_state_changed, SPCallbacks, SPFeedbackConfig, SPHotkeyConfig,
-    SPSessionContext, SPSessionMode,
+    invoke_rewrite_text_ready, invoke_session_error, invoke_session_ready, invoke_session_warning,
+    invoke_state_changed, SPCallbacks, SPFeedbackConfig, SPHotkeyConfig, SPSessionContext,
+    SPSessionMode,
 };
 #[cfg(feature = "mlx")]
 use crate::llm::mlx::MlxLlmProvider;
@@ -547,17 +547,25 @@ pub extern "C" fn sp_core_session_cancel() -> i32 {
     0
 }
 
-fn validate_prompt_templates(templates: &[config::PromptTemplate]) -> std::result::Result<(), String> {
+fn validate_prompt_templates(
+    templates: &[config::PromptTemplate],
+) -> std::result::Result<(), String> {
     if templates.len() > 9 {
         return Err("Prompt templates are limited to 9 entries.".into());
     }
 
     let mut used_shortcuts = HashSet::new();
-    for template in templates {
+    for (index, template) in templates.iter().enumerate() {
+        let template_label = if template.name.trim().is_empty() {
+            format!("Template #{}", index + 1)
+        } else {
+            format!("Template '{}'", template.name.trim())
+        };
+
         if !(1..=9).contains(&template.shortcut) {
             return Err(format!(
-                "Template '{}' uses invalid shortcut {}. Shortcuts must be between 1 and 9.",
-                template.name, template.shortcut
+                "{template_label} uses invalid shortcut {}. Shortcuts must be between 1 and 9.",
+                template.shortcut
             ));
         }
         if !used_shortcuts.insert(template.shortcut) {
@@ -565,6 +573,9 @@ fn validate_prompt_templates(templates: &[config::PromptTemplate]) -> std::resul
                 "Duplicate template shortcut {} detected. Each template needs a unique shortcut.",
                 template.shortcut
             ));
+        }
+        if template.resolve_system_prompt().is_none() {
+            return Err(format!("{template_label} needs a non-empty prompt."));
         }
     }
 
@@ -578,7 +589,8 @@ fn validate_prompt_templates(templates: &[config::PromptTemplate]) -> std::resul
 pub extern "C" fn sp_core_get_prompt_templates_json() -> *mut c_char {
     let global = CORE.lock().unwrap();
     if let Some(ref core) = *global {
-        let json = serde_json::to_string(&core.config.prompt_templates).unwrap_or_else(|_| "[]".into());
+        let json =
+            serde_json::to_string(&core.config.prompt_templates).unwrap_or_else(|_| "[]".into());
         CString::new(json).unwrap_or_default().into_raw()
     } else {
         CString::new("[]").unwrap_or_default().into_raw()
@@ -692,9 +704,7 @@ pub unsafe extern "C" fn sp_core_rewrite_with_template(
     let template = match core.config.prompt_templates.get(idx) {
         Some(t) => t.clone(),
         None => {
-            log::error!(
-                "sp_core_rewrite_with_template: invalid index {idx}"
-            );
+            log::error!("sp_core_rewrite_with_template: invalid index {idx}");
             return -1;
         }
     };
@@ -780,10 +790,7 @@ pub unsafe extern "C" fn sp_core_rewrite_with_template(
             }
             Err(e) => {
                 log::error!("rewrite: template '{}' failed: {e}", template.name);
-                invoke_session_warning(
-                    session_token,
-                    &format!("Rewrite failed: {e}"),
-                );
+                invoke_session_warning(session_token, &format!("Rewrite failed: {e}"));
                 // Fall back to original ASR text
                 invoke_rewrite_text_ready(session_token, &asr_text);
             }
@@ -819,7 +826,11 @@ pub extern "C" fn sp_core_get_hotkey_config() -> SPHotkeyConfig {
     let global = CORE.lock().unwrap();
     if let Some(ref core) = *global {
         let params = core.config.hotkey.resolve();
-        let trigger_mode: u8 = if core.config.hotkey.trigger_mode == "toggle" { 1 } else { 0 };
+        let trigger_mode: u8 = if core.config.hotkey.trigger_mode == "toggle" {
+            1
+        } else {
+            0
+        };
         SPHotkeyConfig {
             trigger_key_code: params.key_code,
             trigger_alt_key_code: params.alt_key_code,
@@ -1002,7 +1013,9 @@ async fn run_session(
     if asr_text.is_empty() {
         // A silent recording is a valid no-op, not a user-visible failure.
         // Exit quietly so the app returns to idle without error sounds or alerts.
-        log::info!("[{session_id}] no ASR text available: treating silent recording as empty result");
+        log::info!(
+            "[{session_id}] no ASR text available: treating silent recording as empty result"
+        );
         cleanup_session(&session_arc);
         invoke_state_changed(session_token, "idle");
         return;
@@ -1821,5 +1834,19 @@ mod tests {
     #[test]
     fn no_error_no_text_does_not_fail() {
         assert!(!should_fail_session(&None, ""));
+    }
+
+    #[test]
+    fn validate_prompt_templates_rejects_blank_prompt() {
+        let templates = vec![config::PromptTemplate {
+            name: "Empty".into(),
+            enabled: true,
+            shortcut: 1,
+            system_prompt: Some("   ".into()),
+            system_prompt_path: None,
+        }];
+
+        let error = validate_prompt_templates(&templates).unwrap_err();
+        assert!(error.contains("non-empty prompt"));
     }
 }
