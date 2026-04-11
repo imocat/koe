@@ -32,7 +32,7 @@ static const BOOL kOverlayLimitVisibleLinesDefault = YES;
 static const NSInteger kOverlayMaxVisibleLinesDefault = 3;
 static const NSInteger kOverlayMaxVisibleLinesMin = 3;
 static const NSInteger kOverlayMaxVisibleLinesMax = 5;
-static NSString *const kOverlayPreviewSampleText = @"今天下午三点我们先开评审会，然后把设计方案、PR 评论和接口联调一起过一遍；如果我这段话持续很久，也希望底部实时字幕保持稳定，不要遮住文字边缘，同时完整保留整段转写内容。";
+static NSString *const kOverlayPreviewSampleText = @"刚试了一下这个语音输入，感觉还挺好用的，说完话自动就把文字整理好了，标点符号也帮你加上了，比打字快多了哈哈。";
 
 // Toolbar item identifiers
 static NSToolbarItemIdentifier const kToolbarASR = @"asr";
@@ -904,11 +904,16 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
     qwenKeyLabel.hidden = YES;
     [pane addSubview:qwenKeyLabel];
 
-    // Test result label
+    // Test result label — positioned inline to the right of the Test button
     self.asrTestResultLabel = [NSTextField wrappingLabelWithString:@""];
-    self.asrTestResultLabel.frame = NSMakeRect(fieldX, 55, fieldW, 42);
+    CGFloat testResultX = NSMaxX(self.asrTestButton.frame) + 8;
+    self.asrTestResultLabel.frame = NSMakeRect(testResultX,
+                                               NSMinY(self.asrTestButton.frame) + 4,
+                                               paneWidth - testResultX - 24,
+                                               20);
     self.asrTestResultLabel.font = [NSFont systemFontOfSize:12];
     self.asrTestResultLabel.selectable = YES;
+    self.asrTestResultLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [pane addSubview:self.asrTestResultLabel];
 
     // Save / Cancel buttons
@@ -2013,11 +2018,22 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
         ? templateData[@"system_prompt_path"]
         : nil;
 
-    BOOL preservePromptPath = (inlinePrompt.length == 0
-                               && promptPath.length > 0
-                               && [editedPrompt isEqualToString:(originalPrompt ?: @"")]);
-    if (preservePromptPath) {
+    // If this template references an external file, preserve that relationship.
+    // Write changes back to the file rather than silently converting to inline.
+    if (inlinePrompt.length == 0 && promptPath.length > 0) {
+        if (![editedPrompt isEqualToString:(originalPrompt ?: @"")]) {
+            NSString *resolvedPath = promptPath.isAbsolutePath
+                ? promptPath
+                : [configDirPath() stringByAppendingPathComponent:promptPath];
+            NSError *writeError = nil;
+            [editedPrompt writeToFile:resolvedPath atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
+            if (writeError) {
+                NSLog(@"[Koe] Failed to write template file %@: %@", resolvedPath, writeError.localizedDescription);
+            }
+            templateData[kTemplateOriginalPromptKey] = editedPrompt;
+        }
         [templateData removeObjectForKey:@"system_prompt"];
+        self.templateEditorDirty = NO;
         return;
     }
 
@@ -3783,8 +3799,6 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     if ([self.delegate respondsToSelector:@selector(setupWizardDidSaveConfig)]) {
         [self.delegate setupWizardDidSaveConfig];
     }
-
-    [self.window close];
 }
 
 - (void)cancelSetup:(id)sender {
@@ -4117,7 +4131,7 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
 
 - (void)testDoubaoImeConnection {
     self.asrTestButton.enabled = NO;
-    self.asrTestResultLabel.stringValue = @"测试中...";
+    self.asrTestResultLabel.stringValue = @"Testing...";
     self.asrTestResultLabel.textColor = [NSColor secondaryLabelColor];
 
     // Test by connecting to the DoubaoIME WebSocket endpoint
@@ -4145,15 +4159,15 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
         if (wsTask.state == NSURLSessionTaskStateRunning) {
             [wsTask cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
             strongSelf.asrTestButton.enabled = YES;
-            strongSelf.asrTestResultLabel.stringValue = @"连接成功 (设备注册将在首次使用时自动完成)";
+            strongSelf.asrTestResultLabel.stringValue = @"Connected (device registration will complete on first use)";
             strongSelf.asrTestResultLabel.textColor = [NSColor systemGreenColor];
         } else if (wsTask.state == NSURLSessionTaskStateCompleted) {
             strongSelf.asrTestButton.enabled = YES;
             if (wsTask.error) {
-                strongSelf.asrTestResultLabel.stringValue = [NSString stringWithFormat:@"连接失败：%@", wsTask.error.localizedDescription];
+                strongSelf.asrTestResultLabel.stringValue = [NSString stringWithFormat:@"Connection failed: %@", wsTask.error.localizedDescription];
                 strongSelf.asrTestResultLabel.textColor = [NSColor systemRedColor];
             } else {
-                strongSelf.asrTestResultLabel.stringValue = @"连接成功 (设备注册将在首次使用时自动完成)";
+                strongSelf.asrTestResultLabel.stringValue = @"Connected (device registration will complete on first use)";
                 strongSelf.asrTestResultLabel.textColor = [NSColor systemGreenColor];
             }
         }
@@ -4166,13 +4180,13 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     NSString *accessKey = self.asrAccessKeyToggle.tag == 1 ? self.asrAccessKeyField.stringValue : self.asrAccessKeySecureField.stringValue;
 
     if (appKey.length == 0 || accessKey.length == 0) {
-        self.asrTestResultLabel.stringValue = @"请先填写 App Key 和 Access Key";
+        self.asrTestResultLabel.stringValue = @"Please fill in App Key and Access Key first";
         self.asrTestResultLabel.textColor = [NSColor systemOrangeColor];
         return;
     }
 
     self.asrTestButton.enabled = NO;
-    self.asrTestResultLabel.stringValue = @"测试中...";
+    self.asrTestResultLabel.stringValue = @"Testing...";
     self.asrTestResultLabel.textColor = [NSColor secondaryLabelColor];
 
     // Create WebSocket connection test
@@ -4220,27 +4234,27 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
 
                 if ([errorMsg containsString:@"401"] || [errorMsg containsString:@"403"] ||
                     [error.localizedFailureReason containsString:@"401"] || statusCode == 401) {
-                    strongSelf.asrTestResultLabel.stringValue = @"认证失败：请检查 App Key 和 Access Key 是否正确";
+                    strongSelf.asrTestResultLabel.stringValue = @"Auth failed: please check App Key and Access Key";
                 } else if ([errorMsg containsString:@"time"] || error.code == NSURLErrorTimedOut) {
-                    strongSelf.asrTestResultLabel.stringValue = @"连接超时：请检查网络连接";
+                    strongSelf.asrTestResultLabel.stringValue = @"Connection timed out: please check your network";
                 } else if ([errorMsg containsString:@"bad response"] ||
                            [errorMsg containsString:@"Bad response"] ||
                            statusCode == 400 || statusCode == 403) {
                     // HTTP error during WebSocket handshake (e.g. 400 Bad Request)
-                    strongSelf.asrTestResultLabel.stringValue = @"认证失败：请检查 App Key 和 Access Key 是否正确";
+                    strongSelf.asrTestResultLabel.stringValue = @"Auth failed: please check App Key and Access Key";
                 } else if ([errorMsg containsString:@"unable"] ||
                            [errorMsg containsString:@"Unable"] ||
                            [errorMsg containsString:@"Cannot connect"] ||
                            [errorMsg containsString:@"Network"]) {
-                    strongSelf.asrTestResultLabel.stringValue = @"网络连接失败：请检查网络设置";
+                    strongSelf.asrTestResultLabel.stringValue = @"Network error: please check your network settings";
                 } else {
-                    strongSelf.asrTestResultLabel.stringValue = @"连接失败：请检查配置信息是否正确";
+                    strongSelf.asrTestResultLabel.stringValue = @"Connection failed: please check your configuration";
                 }
                 strongSelf.asrTestResultLabel.textColor = [NSColor systemRedColor];
                 return;
             }
 
-            strongSelf.asrTestResultLabel.stringValue = @"连接成功";
+            strongSelf.asrTestResultLabel.stringValue = @"Connected";
             strongSelf.asrTestResultLabel.textColor = [NSColor systemGreenColor];
         });
     }];
@@ -4259,7 +4273,7 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
 
         if (!strongSelf.asrTestButton.enabled) {
             strongSelf.asrTestButton.enabled = YES;
-            strongSelf.asrTestResultLabel.stringValue = @"连接成功";
+            strongSelf.asrTestResultLabel.stringValue = @"Connected";
             strongSelf.asrTestResultLabel.textColor = [NSColor systemGreenColor];
         }
     });
@@ -4274,7 +4288,7 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
 
         [wsTask cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
         strongSelf.asrTestButton.enabled = YES;
-        strongSelf.asrTestResultLabel.stringValue = @"连接超时：请检查网络连接";
+        strongSelf.asrTestResultLabel.stringValue = @"Connection timed out: please check your network";
         strongSelf.asrTestResultLabel.textColor = [NSColor systemRedColor];
     });
 }
@@ -4284,13 +4298,13 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     NSString *apiKey = self.asrQwenApiKeyToggle.tag == 1 ? self.asrQwenApiKeyField.stringValue : self.asrQwenApiKeySecureField.stringValue;
 
     if (apiKey.length == 0) {
-        self.asrTestResultLabel.stringValue = @"请先填写 API Key";
+        self.asrTestResultLabel.stringValue = @"Please fill in API Key first";
         self.asrTestResultLabel.textColor = [NSColor systemOrangeColor];
         return;
     }
 
     self.asrTestButton.enabled = NO;
-    self.asrTestResultLabel.stringValue = @"测试中...";
+    self.asrTestResultLabel.stringValue = @"Testing...";
     self.asrTestResultLabel.textColor = [NSColor secondaryLabelColor];
 
     // Create WebSocket connection test
@@ -4335,29 +4349,29 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
 
                 if ([errorMsg containsString:@"401"] || [errorMsg containsString:@"403"] ||
                     statusCode == 401) {
-                    strongSelf.asrTestResultLabel.stringValue = @"认证失败：请检查 API Key 是否正确";
+                    strongSelf.asrTestResultLabel.stringValue = @"Auth failed: please check your API Key";
                 } else if ([errorMsg containsString:@"time"] || error.code == NSURLErrorTimedOut) {
-                    strongSelf.asrTestResultLabel.stringValue = @"连接超时：请检查网络连接";
+                    strongSelf.asrTestResultLabel.stringValue = @"Connection timed out: please check your network";
                 } else if ([errorMsg containsString:@"bad response"] ||
                            [errorMsg containsString:@"Bad response"]) {
                     // HTTP error during WebSocket handshake
-                    strongSelf.asrTestResultLabel.stringValue = @"认证失败：请检查 API Key 是否正确";
+                    strongSelf.asrTestResultLabel.stringValue = @"Auth failed: please check your API Key";
                 } else if ([errorMsg containsString:@"unable"] ||
                            [errorMsg containsString:@"Unable"] ||
                            [errorMsg containsString:@"Cannot connect"]) {
-                    strongSelf.asrTestResultLabel.stringValue = @"网络连接失败：请检查网络设置";
+                    strongSelf.asrTestResultLabel.stringValue = @"Network error: please check your network settings";
                 } else {
-                    strongSelf.asrTestResultLabel.stringValue = @"连接失败：请检查配置信息是否正确";
+                    strongSelf.asrTestResultLabel.stringValue = @"Connection failed: please check your configuration";
                 }
                 strongSelf.asrTestResultLabel.textColor = [NSColor systemRedColor];
                 return;
             }
 
             if (message) {
-                strongSelf.asrTestResultLabel.stringValue = @"连接成功";
+                strongSelf.asrTestResultLabel.stringValue = @"Connected";
                 strongSelf.asrTestResultLabel.textColor = [NSColor systemGreenColor];
             } else {
-                strongSelf.asrTestResultLabel.stringValue = @"连接失败：未收到服务器响应";
+                strongSelf.asrTestResultLabel.stringValue = @"Connection failed: no response from server";
                 strongSelf.asrTestResultLabel.textColor = [NSColor systemRedColor];
             }
         });
@@ -4372,7 +4386,7 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
 
         [wsTask cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];
         strongSelf.asrTestButton.enabled = YES;
-        strongSelf.asrTestResultLabel.stringValue = @"连接超时：请检查网络连接";
+        strongSelf.asrTestResultLabel.stringValue = @"Connection timed out: please check your network";
         strongSelf.asrTestResultLabel.textColor = [NSColor systemRedColor];
     });
 }
