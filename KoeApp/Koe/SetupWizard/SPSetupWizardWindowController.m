@@ -23,7 +23,6 @@ static NSString *const kSystemPromptFile = @"system_prompt.txt";
 static NSString *const kTemplateEditablePromptKey = @"__editable_prompt";
 static NSString *const kTemplateOriginalPromptKey = @"__original_prompt";
 static NSString *const kDefaultLlmChatCompletionsPath = @"/chat/completions";
-static NSString *const kDefaultLlmTimeoutMs = @"8000";
 static NSString *const kOverlayFontFamilyDefault = @"system";
 static NSString *const kOverlayFontFamilySystemLabel = @"System Default";
 static const NSInteger kOverlayFontSizeDefault = 13;
@@ -130,20 +129,6 @@ static NSString *normalizedOverlayFontFamilyValue(NSString *value) {
 
 static BOOL overlayUsesSystemFontFamily(NSString *value) {
     return [normalizedOverlayFontFamilyValue(value) caseInsensitiveCompare:kOverlayFontFamilyDefault] == NSOrderedSame;
-}
-
-static NSString *normalizedLlmTimeoutValue(NSString *value) {
-    NSString *trimmed = [[value ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] copy];
-    if (trimmed.length == 0) return kDefaultLlmTimeoutMs;
-
-    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
-    if ([trimmed rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
-        return nil;
-    }
-
-    unsigned long long parsed = trimmed.longLongValue;
-    if (parsed == 0) return nil;
-    return [NSString stringWithFormat:@"%llu", parsed];
 }
 
 static NSFont *overlayFontForFamily(NSString *fontFamily, CGFloat fontSize) {
@@ -519,7 +504,6 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
 @property (nonatomic, strong) NSPopUpButton *llmRemoteModelPopup;
 @property (nonatomic, strong) NSButton *llmRefreshModelsButton;
 @property (nonatomic, strong) NSTextField *llmChatCompletionsPathField;
-@property (nonatomic, strong) NSTextField *llmTimeoutField;
 @property (nonatomic, strong) NSButton *llmTestButton;
 @property (nonatomic, strong) NSTextField *llmTestResultLabel;
 @property (nonatomic, assign) BOOL llmRemoteModelPickerExpanded;
@@ -970,7 +954,7 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
     CGFloat paneWidth = 600;
     CGFloat contentX = 24.0;
     CGFloat contentW = paneWidth - 48.0;
-    CGFloat contentHeight = 660;
+    CGFloat contentHeight = 580;
 
     // Sidebar (profile list) geometry
     CGFloat sidebarX = 24.0;
@@ -1003,15 +987,7 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
                                                          title:@"LLM Correction"
                                                         toggle:self.llmEnabledCheckbox];
     [pane addSubview:llmEnabledCard];
-    y = NSMinY(llmEnabledCard.frame) - 16.0;
-
-    // Global timeout (applies to all profiles).
-    NSTextField *timeoutLabel = [self formLabel:@"Timeout (ms)" frame:NSMakeRect(contentX + 4, y - 22, 100, 22)];
-    [pane addSubview:timeoutLabel];
-    self.llmTimeoutField = [self formTextField:NSMakeRect(contentX + 110, y - 22, 120, 22) placeholder:kDefaultLlmTimeoutMs];
-    self.llmTimeoutField.delegate = self;
-    [pane addSubview:self.llmTimeoutField];
-    y -= 32;
+    y = NSMinY(llmEnabledCard.frame) - 24.0;
 
     NSTextField *sectionTitle = [self sectionTitleLabel:@"Profiles"
                                                   frame:NSMakeRect(contentX, floor(y - 20.0), contentW, 20.0)];
@@ -2274,20 +2250,6 @@ static void ensureCustomHotkeyInPopup(NSPopUpButton *popup, NSString *value) {
     if (notification.object != self.templatePromptTextView) return;
 
     self.templateEditorDirty = YES;
-}
-
-- (BOOL)control:(NSControl *)control
-        textView:(NSTextView *)textView
-shouldChangeTextInRange:(NSRange)affectedCharRange
- replacementString:(NSString *)replacementString {
-    if (control != self.llmTimeoutField) {
-        return YES;
-    }
-    if (replacementString == nil || replacementString.length == 0) {
-        return YES;
-    }
-    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
-    return [replacementString rangeOfCharacterFromSet:nonDigits].location == NSNotFound;
 }
 
 - (void)toggleSelectedTemplateEnabled:(id)sender {
@@ -3781,8 +3743,6 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     } else if ([identifier isEqualToString:kToolbarLLM]) {
         NSString *enabled = configGet(@"llm.enabled");
         self.llmEnabledCheckbox.state = ([enabled isEqualToString:@"false"]) ? NSControlStateValueOff : NSControlStateValueOn;
-        NSString *timeoutMs = normalizedLlmTimeoutValue(configGet(@"llm.timeout_ms"));
-        self.llmTimeoutField.stringValue = timeoutMs ?: kDefaultLlmTimeoutMs;
 
         [self loadLlmProfilesFromCore];
         self.llmTestResultLabel.stringValue = @"";
@@ -3972,13 +3932,6 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     if (self.llmEnabledCheckbox) {
         NSString *enabledStr = (self.llmEnabledCheckbox.state == NSControlStateValueOn) ? @"true" : @"false";
         saveOk &= configSet(@"llm.enabled", enabledStr);
-        NSString *timeoutMs = normalizedLlmTimeoutValue(self.llmTimeoutField.stringValue);
-        if (!timeoutMs) {
-            [self showAlert:@"Invalid LLM timeout"
-                       info:@"Timeout (ms) must be a positive integer."];
-            return;
-        }
-        saveOk &= configSet(@"llm.timeout_ms", timeoutMs);
 
         [self syncActiveLlmProfileFromFields];
         NSDictionary *payload = @{
@@ -4226,7 +4179,6 @@ static void appleSpeechInstallCallback(void *ctx, int32_t eventType, const char 
     self.llmAddProfileButton.enabled = enabled;
     self.llmDeleteProfileButton.enabled = enabled && self.llmProfiles.count > 1;
     self.llmProfileNameField.enabled = enabled;
-    self.llmTimeoutField.enabled = enabled;
 
     NSDictionary *activeProfile = [self activeLlmProfile];
     NSString *provider = [activeProfile[@"provider"] isKindOfClass:[NSString class]] ? activeProfile[@"provider"] : @"openai";
